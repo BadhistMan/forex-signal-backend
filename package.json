@@ -1,7 +1,7 @@
 {
   "name": "forex-signal-backend",
-  "version": "1.0.0",
-  "description": "Forex Trading Signal Generator API",
+  "version": "2.0.0",
+  "description": "Advanced Forex Trading Signal Generator",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,7 +14,10 @@
     "node-cron": "^3.0.2",
     "axios": "^1.5.0",
     "dotenv": "^16.3.1",
-    "helmet": "^7.0.0"
+    "helmet": "^7.0.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "express-rate-limit": "^7.1.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
