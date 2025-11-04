@@ -56,51 +56,59 @@ const initDB = async () => {
   try {
     const client = await pool.connect();
     
-    // Drop and recreate tables to ensure correct schema
-    await client.query(`
-      DROP TABLE IF EXISTS user_signals;
-      DROP TABLE IF EXISTS signals;
+    // Check if tables exist, if not create them
+    const tablesExist = await client.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'users'
+      );
+    `);
+    
+    if (!tablesExist.rows[0].exists) {
+      console.log('🔄 Creating database tables...');
       
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        name VARCHAR(100) NOT NULL,
-        is_admin BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT NOW(),
-        last_login TIMESTAMP
-      );
+      await client.query(`
+        CREATE TABLE users (
+          id SERIAL PRIMARY KEY,
+          email VARCHAR(255) UNIQUE NOT NULL,
+          password VARCHAR(255) NOT NULL,
+          name VARCHAR(100) NOT NULL,
+          is_admin BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMP DEFAULT NOW(),
+          last_login TIMESTAMP
+        );
 
-      CREATE TABLE IF NOT EXISTS signals (
-        id SERIAL PRIMARY KEY,
-        symbol VARCHAR(20) NOT NULL,
-        name VARCHAR(100) NOT NULL,
-        type VARCHAR(20) NOT NULL,
-        signal VARCHAR(20) NOT NULL,
-        strength VARCHAR(20) NOT NULL,
-        confidence DECIMAL(5,2) NOT NULL,
-        price DECIMAL(15,5) NOT NULL,
-        rsi DECIMAL(5,2),
-        moving_average JSONB,
-        created_at TIMESTAMP DEFAULT NOW()
-      );
+        CREATE TABLE signals (
+          id SERIAL PRIMARY KEY,
+          symbol VARCHAR(20) NOT NULL,
+          name VARCHAR(100) NOT NULL,
+          type VARCHAR(20) NOT NULL,
+          signal VARCHAR(20) NOT NULL,
+          strength VARCHAR(20) NOT NULL,
+          confidence DECIMAL(5,2) NOT NULL,
+          price DECIMAL(15,5) NOT NULL,
+          rsi DECIMAL(5,2),
+          moving_average JSONB,
+          created_at TIMESTAMP DEFAULT NOW()
+        );
 
-      CREATE TABLE IF NOT EXISTS user_signals (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id),
-        signal_id INTEGER REFERENCES signals(id),
-        viewed BOOLEAN DEFAULT FALSE,
-        notified BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
+        CREATE TABLE user_signals (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER REFERENCES users(id),
+          signal_id INTEGER REFERENCES signals(id),
+          viewed BOOLEAN DEFAULT FALSE,
+          notified BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
 
-    // Create indexes
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_symbol_created_at ON signals(symbol, created_at);
-      CREATE INDEX IF NOT EXISTS idx_type ON signals(type);
-      CREATE INDEX IF NOT EXISTS idx_created_at ON signals(created_at);
-    `);
+      // Create indexes
+      await client.query(`
+        CREATE INDEX idx_symbol_created_at ON signals(symbol, created_at);
+        CREATE INDEX idx_type ON signals(type);
+        CREATE INDEX idx_created_at ON signals(created_at);
+      `);
+    }
 
     // Create admin user if not exists
     const adminEmail = 'admin@forexsignal.com';
@@ -116,7 +124,7 @@ const initDB = async () => {
     }
 
     client.release();
-    console.log('✅ Database initialized successfully with correct schema');
+    console.log('✅ Database initialized successfully');
   } catch (err) {
     console.error('❌ Database initialization error:', err);
   }
@@ -271,102 +279,9 @@ class TechnicalAnalysis {
   }
 }
 
-// TwelveData API Service - FIXED VERSION
-class TwelveDataService {
-  constructor(apiKey) {
-    this.apiKey = apiKey;
-    this.baseURL = 'https://api.twelvedata.com';
-  }
-
-  async getPrice(symbol) {
-    try {
-      console.log(`🔍 Fetching price for ${symbol} from TwelveData...`);
-      
-      const response = await axios.get(`${this.baseURL}/price`, {
-        params: {
-          symbol: this.formatSymbol(symbol),
-          apikey: this.apiKey,
-          outputsize: 1
-        },
-        timeout: 10000
-      });
-      
-      console.log(`📊 TwelveData response for ${symbol}:`, response.data);
-      
-      // Handle different response formats from TwelveData
-      if (response.data && response.data.price) {
-        const price = parseFloat(response.data.price);
-        if (!isNaN(price)) {
-          return {
-            price: price,
-            timestamp: response.data.datetime || new Date().toISOString()
-          };
-        }
-      }
-      
-      // If price is not in the expected format, try to find it in the response
-      if (response.data && typeof response.data === 'object') {
-        for (let key in response.data) {
-          const value = response.data[key];
-          if (typeof value === 'string' && !isNaN(parseFloat(value)) && parseFloat(value) > 0) {
-            const price = parseFloat(value);
-            return {
-              price: price,
-              timestamp: new Date().toISOString()
-            };
-          }
-        }
-      }
-      
-      throw new Error('Price not found in response');
-      
-    } catch (error) {
-      console.error(`❌ Error fetching price for ${symbol}:`, error.message);
-      console.log('🔄 Using mock data as fallback...');
-      return this.generateMockData(symbol);
-    }
-  }
-
-  async getTimeSeries(symbol, interval = '1min', outputsize = 30) {
-    try {
-      const response = await axios.get(`${this.baseURL}/time_series`, {
-        params: {
-          symbol: this.formatSymbol(symbol),
-          interval: interval,
-          outputsize: outputsize,
-          apikey: this.apiKey
-        },
-        timeout: 10000
-      });
-      
-      return response.data;
-    } catch (error) {
-      console.error(`❌ Error fetching time series for ${symbol}:`, error.message);
-      return null;
-    }
-  }
-
-  formatSymbol(symbol) {
-    // Format symbols for TwelveData API
-    const symbolMap = {
-      'EUR/USD': 'EUR/USD',
-      'GBP/USD': 'GBP/USD', 
-      'USD/JPY': 'USD/JPY',
-      'USD/CHF': 'USD/CHF',
-      'AUD/USD': 'AUD/USD',
-      'USD/CAD': 'USD/CAD',
-      'BTC/USD': 'BTC/USD',
-      'ETH/USD': 'ETH/USD',
-      'AAPL': 'AAPL',
-      'TSLA': 'TSLA',
-      'GOOGL': 'GOOGL',
-      'MSFT': 'MSFT'
-    };
-    
-    return symbolMap[symbol] || symbol;
-  }
-
-  generateMockData(symbol) {
+// Mock Data Service - COMPLETELY REPLACES TwelveData
+class MockDataService {
+  generatePrice(symbol) {
     const basePrices = {
       'EUR/USD': { price: 1.0850, volatility: 0.002 },
       'GBP/USD': { price: 1.2650, volatility: 0.003 },
@@ -383,43 +298,53 @@ class TwelveDataService {
     };
 
     const base = basePrices[symbol] || { price: 100, volatility: 0.01 };
-    const change = (Math.random() - 0.5) * 2 * base.volatility;
-    const newPrice = base.price * (1 + change);
-
+    
+    // Generate realistic price movement with trend
+    const trend = (Math.random() - 0.5) * base.volatility * 0.5;
+    const noise = (Math.random() - 0.5) * 2 * base.volatility;
+    const newPrice = base.price * (1 + trend + noise);
+    
+    // Ensure price doesn't go negative
+    const finalPrice = Math.max(newPrice, base.price * 0.1);
+    
     return {
-      price: parseFloat(newPrice.toFixed(5)),
+      price: parseFloat(finalPrice.toFixed(5)),
       timestamp: new Date().toISOString()
     };
   }
+
+  generateHistoricalPrices(currentPrice, count = 50) {
+    const prices = [currentPrice];
+    
+    for (let i = 1; i < count; i++) {
+      const previousPrice = prices[i - 1];
+      const volatility = 0.002 + (Math.random() * 0.01);
+      const change = (Math.random() - 0.5) * 2 * volatility;
+      const newPrice = previousPrice * (1 + change);
+      prices.unshift(Math.max(newPrice, previousPrice * 0.8)); // Prevent prices from dropping too low
+    }
+    
+    return prices;
+  }
 }
 
-const twelveData = new TwelveDataService(process.env.TWELVE_DATA_API_KEY);
+const mockData = new MockDataService();
 
 // Generate signals for all symbols
 const generateSignals = async () => {
-  console.log('🔄 Generating trading signals...');
+  console.log('🔄 Generating trading signals with mock data...');
   const newSignals = [];
   
   for (const market of MARKET_SYMBOLS) {
     try {
       console.log(`📈 Processing ${market.symbol}...`);
       
-      // Get current price
-      const priceData = await twelveData.getPrice(market.symbol);
+      // Get current price from mock data
+      const priceData = mockData.generatePrice(market.symbol);
       const currentPrice = priceData.price;
 
-      // Get historical data for technical analysis
-      let historicalPrices = [];
-      
-      // Generate realistic historical data based on current price
-      for (let i = 0; i < 50; i++) {
-        const volatility = market.type === 'crypto' ? 0.03 : 
-                          market.type === 'forex' ? 0.002 : 0.01;
-        const change = (Math.random() - 0.5) * 2 * volatility;
-        const historicalPrice = currentPrice * (1 + change * (50 - i) / 50);
-        historicalPrices.push(historicalPrice);
-      }
-      historicalPrices.push(currentPrice);
+      // Generate historical data
+      const historicalPrices = mockData.generateHistoricalPrices(currentPrice, 50);
 
       // Generate trading signal
       const signalData = TechnicalAnalysis.generateSignal(currentPrice, historicalPrices);
@@ -476,29 +401,33 @@ app.get('/api/health', (req, res) => {
     status: 'OK', 
     message: 'Forex Signal API is running',
     version: '2.0.0',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    dataSource: 'Mock Data (TwelveData API limit exceeded)'
   });
 });
 
-// User registration - FIXED VERSION
+// User registration - SIMPLIFIED AND FIXED
 app.post('/api/users/register', async (req, res) => {
+  let client;
   try {
     const { email, password, name } = req.body;
 
     console.log('📝 Registration attempt for:', email);
 
+    // Basic validation
     if (!email || !password || !name) {
       return res.status(400).json({ error: 'All fields are required' });
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ error: 'Invalid email format' });
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
+    // Get a client from the pool for transaction
+    client = await pool.connect();
+
     // Check if user exists
-    const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const userExists = await client.query('SELECT id FROM users WHERE email = $1', [email]);
     if (userExists.rows.length > 0) {
       return res.status(400).json({ error: 'User already exists with this email' });
     }
@@ -507,7 +436,7 @@ app.post('/api/users/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user
-    const result = await pool.query(
+    const result = await client.query(
       'INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING id, email, name, created_at, is_admin',
       [email, hashedPassword, name]
     );
@@ -541,14 +470,14 @@ app.post('/api/users/register', async (req, res) => {
   } catch (error) {
     console.error('❌ Registration error:', error);
     
-    // Provide more specific error messages
-    if (error.code === '23505') { // Unique violation
+    // Specific error handling
+    if (error.code === '23505') {
       return res.status(400).json({ error: 'User already exists with this email' });
-    } else if (error.code === '23502') { // Not null violation
-      return res.status(400).json({ error: 'All fields are required' });
     }
     
-    res.status(500).json({ error: 'Internal server error. Please try again.' });
+    res.status(500).json({ error: 'Failed to create account. Please try again.' });
+  } finally {
+    if (client) client.release();
   }
 });
 
@@ -679,13 +608,13 @@ app.get('/api/signals/history', authenticateToken, async (req, res) => {
   }
 });
 
-// Get market prices (public)
+// Get market prices (public) - USING MOCK DATA ONLY
 app.get('/api/prices', async (req, res) => {
   try {
     const prices = [];
     
     for (const market of MARKET_SYMBOLS) {
-      const priceData = await twelveData.getPrice(market.symbol);
+      const priceData = mockData.generatePrice(market.symbol);
       
       prices.push({
         symbol: market.symbol,
@@ -698,8 +627,8 @@ app.get('/api/prices', async (req, res) => {
 
     res.json(prices);
   } catch (error) {
-    console.error('❌ Error fetching prices:', error);
-    res.status(500).json({ error: 'Failed to fetch prices' });
+    console.error('❌ Error generating prices:', error);
+    res.status(500).json({ error: 'Failed to generate prices' });
   }
 });
 
@@ -804,6 +733,17 @@ app.get('/api/signals/unread-count', authenticateToken, async (req, res) => {
   }
 });
 
+// Reset database (for development only)
+app.post('/api/reset-db', async (req, res) => {
+  try {
+    await initDB();
+    res.json({ message: 'Database reset successfully' });
+  } catch (error) {
+    console.error('❌ Error resetting database:', error);
+    res.status(500).json({ error: 'Failed to reset database' });
+  }
+});
+
 // Start server and initialize
 const startServer = async () => {
   await initDB();
@@ -813,24 +753,20 @@ const startServer = async () => {
     // Generate initial signals
     await generateSignals();
     
-    // Schedule signal generation every 1 minute
-    cron.schedule('*/1 * * * *', generateSignals);
+    // Schedule signal generation every 2 minutes (less frequent to avoid spam)
+    cron.schedule('*/2 * * * *', generateSignals);
     
-    // Clean up old data every day
-    cron.schedule('0 0 * * *', async () => {
-      console.log('🧹 Cleaning up old signals...');
-      await pool.query(`DELETE FROM signals WHERE created_at < NOW() - INTERVAL '30 days'`);
-    });
-  }, 2000);
+    console.log('✅ Auto-signal generation scheduled every 2 minutes');
+  }, 3000);
 
   app.listen(PORT, () => {
-    console.log(`\n🚀 Fixed Forex Signal API running on port ${PORT}`);
+    console.log(`\n🚀 FIXED Forex Signal API running on port ${PORT}`);
     console.log(`📊 Monitoring ${MARKET_SYMBOLS.length} markets (Forex, Crypto, Stocks)`);
-    console.log(`⏰ Auto-signal generation: Every 1 minute`);
+    console.log(`💰 Data Source: 100% Mock Data (No API limits)`);
+    console.log(`⏰ Auto-signal generation: Every 2 minutes`);
     console.log(`🔐 JWT Authentication: Enabled`);
     console.log(`👑 Admin access: admin@forexsignal.com / admin123`);
-    console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
-    console.log(`🌐 Live URL: https://forex-signal-backend-hx79.onrender.com/api/health\n`);
+    console.log(`🔗 Health check: https://forex-signal-backend-hx79.onrender.com/api/health\n`);
   });
 };
 
