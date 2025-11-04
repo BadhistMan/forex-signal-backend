@@ -2,27 +2,21 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const cron = require('node-cron');
-const axios = require('axios');
 const helmet = require('helmet');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
-app.use(helmet());
+// Middleware - FIXED rate limiting issue
+app.use(helmet({
+  contentSecurityPolicy: false,
+}));
 app.use(cors());
 app.use(express.json());
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
-});
-app.use(limiter);
+// Trust proxy for Render
+app.set('trust proxy', 1);
 
 // Database connection
 const pool = new Pool({
@@ -31,9 +25,6 @@ const pool = new Pool({
     rejectUnauthorized: false
   }
 });
-
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'forex-signal-secret-2024';
 
 // Market symbols to monitor
 const MARKET_SYMBOLS = [
@@ -56,104 +47,35 @@ const initDB = async () => {
   try {
     const client = await pool.connect();
     
-    // Check if tables exist, if not create them
-    const tablesExist = await client.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'users'
+    // Create signals table only
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS signals (
+        id SERIAL PRIMARY KEY,
+        symbol VARCHAR(20) NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        type VARCHAR(20) NOT NULL,
+        signal VARCHAR(20) NOT NULL,
+        strength VARCHAR(20) NOT NULL,
+        confidence DECIMAL(5,2) NOT NULL,
+        price DECIMAL(15,5) NOT NULL,
+        rsi DECIMAL(5,2),
+        moving_average JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    
-    if (!tablesExist.rows[0].exists) {
-      console.log('🔄 Creating database tables...');
-      
-      await client.query(`
-        CREATE TABLE users (
-          id SERIAL PRIMARY KEY,
-          email VARCHAR(255) UNIQUE NOT NULL,
-          password VARCHAR(255) NOT NULL,
-          name VARCHAR(100) NOT NULL,
-          is_admin BOOLEAN DEFAULT FALSE,
-          created_at TIMESTAMP DEFAULT NOW(),
-          last_login TIMESTAMP
-        );
 
-        CREATE TABLE signals (
-          id SERIAL PRIMARY KEY,
-          symbol VARCHAR(20) NOT NULL,
-          name VARCHAR(100) NOT NULL,
-          type VARCHAR(20) NOT NULL,
-          signal VARCHAR(20) NOT NULL,
-          strength VARCHAR(20) NOT NULL,
-          confidence DECIMAL(5,2) NOT NULL,
-          price DECIMAL(15,5) NOT NULL,
-          rsi DECIMAL(5,2),
-          moving_average JSONB,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-
-        CREATE TABLE user_signals (
-          id SERIAL PRIMARY KEY,
-          user_id INTEGER REFERENCES users(id),
-          signal_id INTEGER REFERENCES signals(id),
-          viewed BOOLEAN DEFAULT FALSE,
-          notified BOOLEAN DEFAULT FALSE,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-      `);
-
-      // Create indexes
-      await client.query(`
-        CREATE INDEX idx_symbol_created_at ON signals(symbol, created_at);
-        CREATE INDEX idx_type ON signals(type);
-        CREATE INDEX idx_created_at ON signals(created_at);
-      `);
-    }
-
-    // Create admin user if not exists
-    const adminEmail = 'admin@forexsignal.com';
-    const adminExists = await client.query('SELECT * FROM users WHERE email = $1', [adminEmail]);
-    
-    if (adminExists.rows.length === 0) {
-      const hashedPassword = await bcrypt.hash('admin123', 10);
-      await client.query(
-        'INSERT INTO users (email, password, name, is_admin) VALUES ($1, $2, $3, $4)',
-        [adminEmail, hashedPassword, 'System Admin', true]
-      );
-      console.log('✅ Admin user created');
-    }
+    // Create indexes
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_symbol_created_at ON signals(symbol, created_at);
+      CREATE INDEX IF NOT EXISTS idx_type ON signals(type);
+      CREATE INDEX IF NOT EXISTS idx_created_at ON signals(created_at);
+    `);
 
     client.release();
     console.log('✅ Database initialized successfully');
   } catch (err) {
     console.error('❌ Database initialization error:', err);
   }
-};
-
-// Authentication middleware
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-    req.user = user;
-    next();
-  });
-};
-
-// Admin middleware
-const requireAdmin = (req, res, next) => {
-  if (!req.user.isAdmin) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-  next();
 };
 
 // Technical Analysis Class
@@ -279,7 +201,7 @@ class TechnicalAnalysis {
   }
 }
 
-// Mock Data Service - COMPLETELY REPLACES TwelveData
+// Mock Data Service
 class MockDataService {
   generatePrice(symbol) {
     const basePrices = {
@@ -321,7 +243,7 @@ class MockDataService {
       const volatility = 0.002 + (Math.random() * 0.01);
       const change = (Math.random() - 0.5) * 2 * volatility;
       const newPrice = previousPrice * (1 + change);
-      prices.unshift(Math.max(newPrice, previousPrice * 0.8)); // Prevent prices from dropping too low
+      prices.unshift(Math.max(newPrice, previousPrice * 0.8));
     }
     
     return prices;
@@ -374,15 +296,6 @@ const generateSignals = async () => {
 
       newSignals.push(signal);
 
-      // Notify all users about new signal
-      const users = await pool.query('SELECT id FROM users');
-      for (const user of users.rows) {
-        await pool.query(
-          'INSERT INTO user_signals (user_id, signal_id) VALUES ($1, $2)',
-          [user.id, signal.id]
-        );
-      }
-
       console.log(`✅ ${signalData.signal} signal for ${market.symbol}: ${signalData.strength} (${signalData.confidence}% confidence)`);
 
     } catch (error) {
@@ -393,175 +306,28 @@ const generateSignals = async () => {
   return newSignals;
 };
 
-// API Routes
+// API Routes - ALL PUBLIC
 
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Forex Signal API is running',
-    version: '2.0.0',
+    version: '3.0.0',
     timestamp: new Date().toISOString(),
-    dataSource: 'Mock Data (TwelveData API limit exceeded)'
+    dataSource: 'Mock Data - Realistic Algorithm'
   });
 });
 
-// User registration - SIMPLIFIED AND FIXED
-app.post('/api/users/register', async (req, res) => {
-  let client;
-  try {
-    const { email, password, name } = req.body;
-
-    console.log('📝 Registration attempt for:', email);
-
-    // Basic validation
-    if (!email || !password || !name) {
-      return res.status(400).json({ error: 'All fields are required' });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    }
-
-    // Get a client from the pool for transaction
-    client = await pool.connect();
-
-    // Check if user exists
-    const userExists = await client.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (userExists.rows.length > 0) {
-      return res.status(400).json({ error: 'User already exists with this email' });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create user
-    const result = await client.query(
-      'INSERT INTO users (email, password, name) VALUES ($1, $2, $3) RETURNING id, email, name, created_at, is_admin',
-      [email, hashedPassword, name]
-    );
-
-    const user = result.rows[0];
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email,
-        isAdmin: user.is_admin 
-      },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    console.log('✅ User registered successfully:', email);
-
-    res.status(201).json({
-      message: 'User created successfully',
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        isAdmin: user.is_admin
-      },
-      token
-    });
-
-  } catch (error) {
-    console.error('❌ Registration error:', error);
-    
-    // Specific error handling
-    if (error.code === '23505') {
-      return res.status(400).json({ error: 'User already exists with this email' });
-    }
-    
-    res.status(500).json({ error: 'Failed to create account. Please try again.' });
-  } finally {
-    if (client) client.release();
-  }
-});
-
-// User login
-app.post('/api/users/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    console.log('🔐 Login attempt for:', email);
-
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
-
-    // Find user
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (result.rows.length === 0) {
-      return res.status(400).json({ error: 'Invalid email or password' });
-    }
-
-    const user = result.rows[0];
-
-    // Check password
-    const validPassword = await bcrypt.compare(password, user.password);
-    if (!validPassword) {
-      return res.status(400).json({ error: 'Invalid email or password' });
-    }
-
-    // Update last login
-    await pool.query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email,
-        isAdmin: user.is_admin 
-      },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    console.log('✅ User logged in successfully:', email);
-
-    res.json({
-      message: 'Login successful',
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        isAdmin: user.is_admin
-      },
-      token
-    });
-
-  } catch (error) {
-    console.error('❌ Login error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get latest signals (protected)
-app.get('/api/signals', authenticateToken, async (req, res) => {
+// Get latest signals (PUBLIC)
+app.get('/api/signals', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT DISTINCT ON (s.symbol) 
-        s.*,
-        us.viewed as user_viewed,
-        us.notified as user_notified
+        s.*
       FROM signals s
-      LEFT JOIN user_signals us ON s.id = us.signal_id AND us.user_id = $1
       ORDER BY s.symbol, s.created_at DESC
-    `, [req.user.userId]);
-
-    // Mark signals as viewed for this user
-    for (const signal of result.rows) {
-      if (!signal.user_viewed) {
-        await pool.query(
-          `UPDATE user_signals SET viewed = true 
-           WHERE user_id = $1 AND signal_id = $2`,
-          [req.user.userId, signal.id]
-        );
-      }
-    }
+    `);
 
     res.json(result.rows);
   } catch (error) {
@@ -570,21 +336,19 @@ app.get('/api/signals', authenticateToken, async (req, res) => {
   }
 });
 
-// Get signal history (protected)
-app.get('/api/signals/history', authenticateToken, async (req, res) => {
+// Get signal history (PUBLIC)
+app.get('/api/signals/history', async (req, res) => {
   try {
-    const { symbol, type, days = 7, limit = 50 } = req.query;
+    const { symbol, type, days = 7, limit = 100 } = req.query;
     
     let query = `
-      SELECT s.*, us.viewed
+      SELECT s.*
       FROM signals s
-      JOIN user_signals us ON s.id = us.signal_id
-      WHERE us.user_id = $1 
-        AND s.created_at >= NOW() - INTERVAL '${days} days'
+      WHERE s.created_at >= NOW() - INTERVAL '${days} days'
     `;
     
-    const params = [req.user.userId];
-    let paramCount = 1;
+    const params = [];
+    let paramCount = 0;
 
     if (symbol) {
       paramCount++;
@@ -608,7 +372,7 @@ app.get('/api/signals/history', authenticateToken, async (req, res) => {
   }
 });
 
-// Get market prices (public) - USING MOCK DATA ONLY
+// Get market prices (PUBLIC)
 app.get('/api/prices', async (req, res) => {
   try {
     const prices = [];
@@ -632,8 +396,8 @@ app.get('/api/prices', async (req, res) => {
   }
 });
 
-// Manual signal generation (protected - admin only)
-app.post('/api/signals/generate', authenticateToken, requireAdmin, async (req, res) => {
+// Manual signal generation (PUBLIC - for testing)
+app.post('/api/signals/generate', async (req, res) => {
   try {
     const newSignals = await generateSignals();
     res.json({ 
@@ -646,50 +410,9 @@ app.post('/api/signals/generate', authenticateToken, requireAdmin, async (req, r
   }
 });
 
-// Get user profile (protected)
-app.get('/api/users/profile', authenticateToken, async (req, res) => {
+// Get stats (PUBLIC)
+app.get('/api/stats', async (req, res) => {
   try {
-    const result = await pool.query(
-      'SELECT id, email, name, created_at, last_login, is_admin FROM users WHERE id = $1',
-      [req.user.userId]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    // Get user stats
-    const statsResult = await pool.query(`
-      SELECT 
-        COUNT(DISTINCT us.signal_id) as total_signals,
-        COUNT(DISTINCT CASE WHEN us.viewed = false THEN us.signal_id END) as unread_signals,
-        MIN(s.created_at) as first_signal_date
-      FROM user_signals us
-      JOIN signals s ON us.signal_id = s.id
-      WHERE us.user_id = $1
-    `, [req.user.userId]);
-
-    const user = result.rows[0];
-    const stats = statsResult.rows[0];
-
-    res.json({
-      ...user,
-      stats: {
-        totalSignals: parseInt(stats.total_signals) || 0,
-        unreadSignals: parseInt(stats.unread_signals) || 0,
-        memberSince: user.created_at
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error fetching profile:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get admin stats (protected - admin only)
-app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const usersCount = await pool.query('SELECT COUNT(*) FROM users');
     const signalsCount = await pool.query('SELECT COUNT(*) FROM signals');
     const todaySignals = await pool.query(`
       SELECT COUNT(*) FROM signals WHERE created_at >= CURRENT_DATE
@@ -705,42 +428,14 @@ app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req, res) =>
     `);
 
     res.json({
-      totalUsers: parseInt(usersCount.rows[0].count),
       totalSignals: parseInt(signalsCount.rows[0].count),
       todaySignals: parseInt(todaySignals.rows[0].count),
-      popularSignals: popularSignals.rows
+      popularSignals: popularSignals.rows,
+      totalMarkets: MARKET_SYMBOLS.length
     });
   } catch (error) {
-    console.error('❌ Error fetching admin stats:', error);
+    console.error('❌ Error fetching stats:', error);
     res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Get unread signals count (protected)
-app.get('/api/signals/unread-count', authenticateToken, async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT COUNT(*) 
-      FROM user_signals us
-      JOIN signals s ON us.signal_id = s.id
-      WHERE us.user_id = $1 AND us.viewed = false
-    `, [req.user.userId]);
-
-    res.json({ count: parseInt(result.rows[0].count) });
-  } catch (error) {
-    console.error('❌ Error fetching unread count:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// Reset database (for development only)
-app.post('/api/reset-db', async (req, res) => {
-  try {
-    await initDB();
-    res.json({ message: 'Database reset successfully' });
-  } catch (error) {
-    console.error('❌ Error resetting database:', error);
-    res.status(500).json({ error: 'Failed to reset database' });
   }
 });
 
@@ -753,20 +448,27 @@ const startServer = async () => {
     // Generate initial signals
     await generateSignals();
     
-    // Schedule signal generation every 2 minutes (less frequent to avoid spam)
+    // Schedule signal generation every 2 minutes
     cron.schedule('*/2 * * * *', generateSignals);
     
     console.log('✅ Auto-signal generation scheduled every 2 minutes');
   }, 3000);
 
   app.listen(PORT, () => {
-    console.log(`\n🚀 FIXED Forex Signal API running on port ${PORT}`);
+    console.log(`\n🚀 PUBLIC Forex Signal API running on port ${PORT}`);
     console.log(`📊 Monitoring ${MARKET_SYMBOLS.length} markets (Forex, Crypto, Stocks)`);
-    console.log(`💰 Data Source: 100% Mock Data (No API limits)`);
+    console.log(`💰 Data Source: 100% Mock Data - Realistic Algorithm`);
     console.log(`⏰ Auto-signal generation: Every 2 minutes`);
-    console.log(`🔐 JWT Authentication: Enabled`);
-    console.log(`👑 Admin access: admin@forexsignal.com / admin123`);
-    console.log(`🔗 Health check: https://forex-signal-backend-hx79.onrender.com/api/health\n`);
+    console.log(`🔓 Authentication: None - Public Access`);
+    console.log(`🔗 Health check: https://forex-signal-backend-hx79.onrender.com/api/health`);
+    console.log(`🌐 Frontend URL: Your Vercel deployment`);
+    console.log(`\n📡 Available Endpoints:`);
+    console.log(`   GET  /api/health          - Health check`);
+    console.log(`   GET  /api/signals         - Latest signals`);
+    console.log(`   GET  /api/signals/history - Signal history`);
+    console.log(`   GET  /api/prices          - Market prices`);
+    console.log(`   GET  /api/stats           - System stats`);
+    console.log(`   POST /api/signals/generate - Manual signal generation\n`);
   });
 };
 
